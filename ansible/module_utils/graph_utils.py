@@ -7,7 +7,10 @@ from operator import itemgetter
 from itertools import groupby
 from natsort import natsorted
 
-from ansible.module_utils.port_utils import get_port_alias_to_name_map
+try:
+    from ansible.module_utils.port_utils import get_port_alias_to_name_map
+except ImportError:
+    from module_utils.port_utils import get_port_alias_to_name_map
 
 
 class LabGraph(object):
@@ -19,12 +22,18 @@ class LabGraph(object):
         "console_links": "sonic_{}_console_links.csv",
         "bmc_links": "sonic_{}_bmc_links.csv",
         "l1_links": "sonic_{}_l1_links.csv",
+        "serial_links": "sonic_{}_serial_links.csv",
     }
 
-    def __init__(self, path, group):
+    def __init__(self, path, group, forced_mgmt_routes=None):
         self.path = path
         self.group = group
         self.csv_files = {k: os.path.join(self.path, v.format(group)) for k, v in self.SUPPORTED_CSV_FILES.items()}
+
+        self.forced_mgmt_routes = forced_mgmt_routes or []
+        self.forced_mgmt_routes_v4, self.forced_mgmt_routes_v6 = self._parse_forced_mgmt_routes(
+            self.forced_mgmt_routes
+        )
 
         self._cache_port_alias_to_name = {}
         self._cache_port_name_to_alias = {}
@@ -47,6 +56,50 @@ class LabGraph(object):
         with open(v) as csvfile:
             reader = csv.DictReader(csvfile)
             return [row for row in reader]
+
+    def _parse_forced_mgmt_routes(self, forced_mgmt_routes):
+        routes_v4 = []
+        routes_v6 = []
+        if not forced_mgmt_routes:
+            return routes_v4, routes_v6
+
+        if isinstance(forced_mgmt_routes, six.string_types):
+            route_items = [
+                route.strip()
+                for route in forced_mgmt_routes.replace(";", ",").split(",")
+                if route.strip()
+            ]
+        elif isinstance(forced_mgmt_routes, (list, tuple, set)):
+            route_items = []
+            for route in forced_mgmt_routes:
+                if route is None:
+                    continue
+                if isinstance(route, six.string_types):
+                    route = route.strip()
+                route_items.append(str(route).strip())
+            route_items = [route for route in route_items if route]
+        else:
+            route_items = [str(forced_mgmt_routes).strip()]
+
+        for route in route_items:
+            if not route:
+                continue
+            try:
+                network = ipaddress.ip_network(six.text_type(route), strict=False)
+            except ValueError:
+                try:
+                    interface = ipaddress.ip_interface(six.text_type(route))
+                    network = interface.network
+                except ValueError:
+                    logging.warning("Skipping invalid forced mgmt route: %s", route)
+                    continue
+
+            if network.version == 4:
+                routes_v4.append(route)
+            else:
+                routes_v6.append(route)
+
+        return routes_v4, routes_v6
 
     def _port_vlanlist(self, vlanrange):
         """Convert vlan range string to list of vlan ids
@@ -142,11 +195,16 @@ class LabGraph(object):
                     entry["CardType"] = "Linecard"
                 if "HwSkuType" not in entry:
                     entry["HwSkuType"] = "predefined"
+            entry["ManagementRoutes"] = list(self.forced_mgmt_routes_v4)
+            entry["ManagementRoutesV6"] = list(self.forced_mgmt_routes_v6)
             devices[entry["Hostname"]] = entry
         self.graph_facts["devices"] = devices
 
         links = {}
+        linked_ports = {}
         port_vlans = {}
+        vrfs = {}
+        port_vrfs = {}
         links_group_by_devices = {}
         ports_group_by_devices = {}
 
@@ -166,7 +224,7 @@ class LabGraph(object):
             ports_group_by_devices[entry['EndDevice']].append(entry['EndPort'])
 
         convert_alias_to_name = []
-        for device, device_links in links_group_by_devices.items():
+        for device, start_ports in links_group_by_devices.items():
             if self.graph_facts["devices"][device].get("Os", "").lower() == "sonic":
                 if any([port not in self._get_port_alias_set(device) and port not in self._get_port_name_set(device) for port in ports_group_by_devices[device]]):  # noqa: E501
                     continue
@@ -196,25 +254,36 @@ class LabGraph(object):
             band_width = link["BandWidth"]
             vlan_ID = link["VlanID"]
             vlan_mode = link["VlanMode"]
+            start_vlan_id = link.get("StartVlanID", vlan_ID)
+            start_vlan_mode = link.get("StartVlanMode", vlan_mode)
+            start_vrf_name = link.get("StartVrf", None)
+            end_vlan_id = link.get("EndVlanID", vlan_ID)
+            end_vlan_mode = link.get("EndVlanMode", vlan_mode)
+            end_vrf_name = link.get("EndVrf", None)
+            start_port_mac = link.get("StartPortMac", None)
+            end_port_mac = link.get("EndPortMac", None)
             autoneg_mode = link.get("AutoNeg")
             fec_disable = link.get("FECDisable", False)
+            linktraining_mode = link.get("LinkTraining", "")
 
-            if start_device not in links:
-                links[start_device] = {}
-            if end_device not in links:
-                links[end_device] = {}
-            if start_device not in port_vlans:
-                port_vlans[start_device] = {}
-            if end_device not in port_vlans:
-                port_vlans[end_device] = {}
+            links.setdefault(start_device, {})
+            links.setdefault(end_device, {})
+            linked_ports.setdefault(start_device, {}).setdefault(start_port, [])
+            linked_ports.setdefault(end_device, {}).setdefault(end_port, [])
+            port_vlans.setdefault(start_device, {})
+            port_vlans.setdefault(end_device, {})
+            vrfs.setdefault(start_device, set())
+            vrfs.setdefault(end_device, set())
+            port_vrfs.setdefault(start_device, {})
+            port_vrfs.setdefault(end_device, {})
 
-            links[start_device][start_port] = {
+            start_port_linked_port = {
                 "peerdevice": end_device,
                 "peerport": end_port,
                 "speed": band_width,
                 "fec_disable": fec_disable
             }
-            links[end_device][end_port] = {
+            end_port_linked_port = {
                 "peerdevice": start_device,
                 "peerport": start_port,
                 "speed": band_width,
@@ -222,22 +291,48 @@ class LabGraph(object):
             }
 
             if autoneg_mode:
-                links[start_device][start_port].update({"autoneg": autoneg_mode})
-                links[end_device][end_port].update({"autoneg": autoneg_mode})
+                start_port_linked_port.update({"autoneg": autoneg_mode})
+                end_port_linked_port.update({"autoneg": autoneg_mode})
+
+            if linktraining_mode:
+                start_port_linked_port.update({"linktraining": linktraining_mode})
+                end_port_linked_port.update({"linktraining": linktraining_mode})
+
+            if start_port_mac:
+                start_port_linked_port.update({"mac": start_port_mac})
+
+            if end_port_mac:
+                end_port_linked_port.update({"mac": end_port_mac})
+
+            links[start_device][start_port] = start_port_linked_port
+            links[end_device][end_port] = end_port_linked_port
+            linked_ports[start_device][start_port].append(start_port_linked_port)
+            linked_ports[end_device][end_port].append(end_port_linked_port)
 
             port_vlans[start_device][start_port] = {
-                "mode": vlan_mode,
-                "vlanids": vlan_ID,
-                "vlanlist": self._port_vlanlist(vlan_ID),
+                "mode": start_vlan_mode,
+                "vlanids": start_vlan_id,
+                "vlanlist": self._port_vlanlist(start_vlan_id),
             }
             port_vlans[end_device][end_port] = {
-                "mode": vlan_mode,
-                "vlanids": vlan_ID,
-                "vlanlist": self._port_vlanlist(vlan_ID),
+                "mode": end_vlan_mode,
+                "vlanids": end_vlan_id,
+                "vlanlist": self._port_vlanlist(end_vlan_id),
             }
 
+            if start_vrf_name:
+                vrfs[start_device].add(start_vrf_name)
+                port_vrfs[start_device][start_port] = {"name": start_vrf_name}
+
+            if end_vrf_name:
+                vrfs[end_device].add(end_vrf_name)
+                port_vrfs[end_device][end_port] = {"name": end_vrf_name}
+
         self.graph_facts["links"] = links
+        self.graph_facts["linked_ports"] = linked_ports
         self.graph_facts["port_vlans"] = port_vlans
+        self.graph_facts["vrfs"] = vrfs
+        self.graph_facts["port_vrfs"] = port_vrfs
 
         console_links = {}
         for entry in self.csv_facts["console_links"]:
@@ -295,16 +390,27 @@ class LabGraph(object):
 
             if l1_name not in from_l1_links:
                 from_l1_links[l1_name] = {}
-            from_l1_links[l1_name][l1_port] = {
-                "peerdevice": device_name,
-                "peerport": device_port,
-            }
+
+            if "|" in l1_port:
+                lanes = l1_port.split("|")
+
+                for lane in lanes:
+                    from_l1_links[l1_name][lane] = {
+                        "peerdevice": device_name,
+                        "peerport": device_port
+                    }
+            else:
+                from_l1_links[l1_name][l1_port] = {
+                    "peerdevice": device_name,
+                    "peerport": device_port,
+                }
 
             if device_name not in to_l1_links:
                 to_l1_links[device_name] = {}
+
             to_l1_links[device_name][device_port] = {
                 "peerdevice": l1_name,
-                "peerport": l1_port,
+                "peerport": l1_port if "|" not in l1_port else l1_port.split("|"),
             }
 
         logging.debug("Found L1 links from L1 switches to devices: {}".format(from_l1_links))
@@ -313,50 +419,42 @@ class LabGraph(object):
         self.graph_facts["from_l1_links"] = from_l1_links
         self.graph_facts["to_l1_links"] = to_l1_links
 
-        # Create L1 cross connects
-        # If the start and end port of a link are both connected to the same L1 switches,
-        # we consider it as a cross connect link.
-        l1_cross_connects = {}
-        for start_device, device_links in links.items():
-            for start_port, link in device_links.items():
-                end_device = link["peerdevice"]
-                end_port = link["peerport"]
+        # Process serial links
+        serial_links = {}
+        for entry in self.csv_facts["serial_links"]:
+            start_device = entry["StartDevice"]
+            start_port = entry["StartPort"]
+            end_device = entry["EndDevice"]
+            end_port = entry["EndPort"]
 
-                # Skip if not connected to any L1 devices
-                if start_device not in to_l1_links or \
-                        end_device not in to_l1_links:
-                    continue
+            if start_device not in serial_links:
+                serial_links[start_device] = {}
+            if end_device not in serial_links:
+                serial_links[end_device] = {}
 
-                # Skip if the start and end ports are not connected to any L1 devices
-                if start_port not in to_l1_links[start_device] and \
-                        end_port not in to_l1_links[end_device]:
-                    continue
+            serial_links[start_device][start_port] = {
+                "peerdevice": end_device,
+                "peerport": end_port,
+                "baud_rate": entry.get("BaudRate", "9600"),
+                "flow_control": entry.get("FlowControl", "0"),
+            }
+            serial_links[end_device][end_port] = {
+                "peerdevice": start_device,
+                "peerport": start_port,
+                "baud_rate": entry.get("BaudRate", "9600"),
+                "flow_control": entry.get("FlowControl", "0"),
+            }
 
-                # Skip if the start and end ports are not connected to the same L1 device
-                l1_start_device = to_l1_links[start_device][start_port]["peerdevice"]
-                l1_end_device = to_l1_links[end_device][end_port]["peerdevice"]
-                if l1_start_device != l1_end_device:
-                    logging.debug(f"Found L1 connected port pairs not using the same L1 device: "
-                                  f"{start_device}:{start_port} <-> {end_device}:{end_port} "
-                                  f"on L1 devices {l1_start_device} and {l1_end_device}")
-                    continue
-
-                logging.debug("Found L1 cross connect: {}:{} <-> {}:{} on L1 device {}".format(
-                    start_device, start_port, end_device, end_port, l1_start_device))
-
-                if l1_start_device not in l1_cross_connects:
-                    l1_cross_connects[l1_start_device] = {}
-
-                l1_start_port = to_l1_links[start_device][start_port]["peerport"]
-                l1_end_port = to_l1_links[end_device][end_port]["peerport"]
-                l1_port_pair = sorted([l1_start_port, l1_end_port])
-                l1_cross_connects[l1_start_device][l1_port_pair[0]] = l1_port_pair[1]
-        self.graph_facts["l1_cross_connects"] = l1_cross_connects
+        logging.debug("Found serial links: {}".format(serial_links))
+        self.graph_facts["serial_links"] = serial_links
 
     def build_results(self, hostnames, ignore_error=False):
         device_info = {}
         device_conn = {}
+        device_linked_ports = {}
+        device_vrfs = {}
         device_port_vlans = {}
+        device_port_vrfs = {}
         device_vlan_list = {}
         device_vlan_range = {}
         device_vlan_map_list = {}
@@ -369,7 +467,10 @@ class LabGraph(object):
         device_from_l1_links = {}
         device_to_l1_links = {}
         device_l1_cross_connects = {}
+        device_serial_link = {}
         msg = ""
+
+        logging.debug("Building results for hostnames: {}".format(hostnames))
 
         for hostname in hostnames:
             device = self.graph_facts["devices"].get(hostname, None)
@@ -382,6 +483,8 @@ class LabGraph(object):
             device_conn[hostname] = self.graph_facts["links"].get(hostname, {})
 
             device_port_vlans[hostname] = self.graph_facts["port_vlans"].get(hostname, {})
+            device_port_vrfs[hostname] = self.graph_facts["port_vrfs"].get(hostname, {})
+            device_vrfs[hostname] = self.graph_facts["vrfs"].get(hostname, {})
 
             vlan_list = []
             for port_info in device_port_vlans[hostname].values():
@@ -474,8 +577,95 @@ class LabGraph(object):
 
             device_from_l1_links[hostname] = self.graph_facts["from_l1_links"].get(hostname, {})
             device_to_l1_links[hostname] = self.graph_facts["to_l1_links"].get(hostname, {})
-            device_l1_cross_connects[hostname] = self.graph_facts["l1_cross_connects"].get(hostname, {})
 
-        results = {k: v for k, v in locals().items() if (k.startswith("device_") and v)}
+            device_serial_link[hostname] = self.graph_facts["serial_links"].get(hostname, {})
+
+        filtered_linked_ports = self._filter_linked_ports(hostnames)
+        l1_cross_connects = self._create_l1_cross_connects(filtered_linked_ports)
+
+        for hostname in hostnames:
+            device_linked_ports[hostname] = filtered_linked_ports.get(hostname, {})
+            device_l1_cross_connects[hostname] = l1_cross_connects.get(hostname, {})
+
+        results = {k: v for k, v in locals().items()
+                   if (k.startswith("device_") and v)}
 
         return (True, results)
+
+    def _filter_linked_ports(self, hostnames):
+        # Create L1 cross connects for the requested hostnames
+        # Filter linked ports to only include connections between devices
+        # that are in the hostnames list, then craft cross connects
+        hostnames_set = set(hostnames)
+
+        # First, collect all relevant linked ports between requested hostnames
+        # Maintain the same data structure as linked_ports
+        filtered_linked_ports = {}
+        for hostname in hostnames:
+            if hostname not in self.graph_facts["linked_ports"]:
+                continue
+
+            linked_ports_facts = self.graph_facts["linked_ports"][hostname]
+            for start_port, linked_ports in linked_ports_facts.items():
+                for linked_port in linked_ports:
+                    end_device = linked_port["peerdevice"]
+
+                    # Only include links where both devices are in hostnames
+                    if end_device in hostnames_set:
+                        if hostname not in filtered_linked_ports:
+                            filtered_linked_ports[hostname] = {}
+                        filtered_linked_ports[hostname][start_port] = linked_port
+
+        logging.debug("Filtered linked ports: {}".format(filtered_linked_ports))
+
+        return filtered_linked_ports
+
+    def _create_l1_cross_connects(self, filtered_linked_ports):
+        # Now process the filtered linked ports to create cross connects
+        l1_cross_connects = {}
+        to_l1_links = self.graph_facts["to_l1_links"]
+        for start_device, start_ports in filtered_linked_ports.items():
+            for start_port, linked_port in start_ports.items():
+                end_device = linked_port["peerdevice"]
+                end_port = linked_port["peerport"]
+
+                # Skip if not connected to any L1 devices
+                if start_device not in to_l1_links or end_device not in to_l1_links:
+                    continue
+
+                # Skip if the start and end ports are not connected to
+                # any L1 devices
+                if start_port not in to_l1_links[start_device] or end_port not in to_l1_links[end_device]:
+                    continue
+
+                # Skip if the start and end ports are not connected to
+                # the same L1 device
+                l1_start_device = to_l1_links[start_device][start_port]["peerdevice"]
+                l1_end_device = to_l1_links[end_device][end_port]["peerdevice"]
+                l1_start_port = to_l1_links[start_device][start_port]["peerport"]
+                l1_end_port = to_l1_links[end_device][end_port]["peerport"]
+
+                if l1_start_device != l1_end_device:
+                    logging.debug(
+                        f"Found L1 connected port pairs not using the "
+                        f"same L1 device: {start_device}:{start_port} <-> "
+                        f"{end_device}:{end_port} on L1 devices "
+                        f"{l1_start_device} and {l1_end_device}")
+                    continue
+
+                logging.debug(
+                    "Found L1 cross connect: {}:{} <-> {}:{} on L1 device {}:{}:{}".format(
+                        start_device, start_port, end_device, end_port, l1_start_device, l1_start_port, l1_end_port))
+
+                if l1_start_device not in l1_cross_connects:
+                    l1_cross_connects[l1_start_device] = {}
+
+                l1_port_pair = sorted([l1_start_port, l1_end_port])
+
+                if isinstance(l1_port_pair[0], list) and isinstance(l1_port_pair[1], list):
+                    for l1_port_start, l1_port_end in zip(l1_port_pair[0], l1_port_pair[1]):
+                        l1_cross_connects[l1_start_device][l1_port_start] = l1_port_end
+                else:
+                    l1_cross_connects[l1_start_device][l1_port_pair[0]] = l1_port_pair[1]
+
+        return l1_cross_connects

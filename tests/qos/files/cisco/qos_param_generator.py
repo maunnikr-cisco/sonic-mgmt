@@ -12,8 +12,11 @@ class QosParamCisco(object):
                                                         "Cisco-8101-C64",
                                                         "Cisco-8101-O8C48",
                                                         "Cisco-8101-O8V48"],
-                              "x86_64-8101_32fh_o_c01-r0": ["Cisco-8101-O32",
-                                                            "Cisco-8101-V64"],
+                              "x86_64-8101_32fh_o_c01-r0": ["Cisco-8101C01-O8V48",
+                                                            "Cisco-8101C01-O32",
+                                                            "Cisco-8101C01-V64",
+                                                            "Cisco-8101C01-C28S4",
+                                                            "Cisco-8101C01-C32"],
                               "x86_64-8102_64h_o-r0": ["Cisco-8102-C64"]}
     VOQ_ASICS = ["gb", "gr"]
 
@@ -679,7 +682,7 @@ class QosParamCisco(object):
                       "dscp_list": self.dscp_list,
                       "q_list": self.q_list,
                       "q_pkt_cnt": q_pkt_cnt,
-                      "limit": 80}
+                      "limit": 160}    # new higher limit from 202511 onwards, due to changes in image.
             self.write_params("wrr", params)
 
     def __define_wrr_chg(self):
@@ -702,7 +705,7 @@ class QosParamCisco(object):
                       "dscp_list": self.dscp_list,
                       "q_list": self.q_list,
                       "q_pkt_cnt": q_pkt_cnt,
-                      "limit": 80,
+                      "limit": 160,    # new higher limit from 202511 onwards, due to changes in image.
                       "lossy_weight": 8,
                       "lossless_weight": 30}
             self.write_params("wrr_chg", params)

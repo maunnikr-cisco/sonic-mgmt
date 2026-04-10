@@ -2,6 +2,7 @@
 PDUValidator - Validates that all DevSonic and Fanout devices have PDU connections configured
 """
 
+import re
 from .base_validator import GlobalValidator, ValidatorContext
 from .validator_factory import register_validator
 
@@ -17,6 +18,25 @@ class PDUValidator(GlobalValidator):
             category="connectivity",
             config=config
         )
+        self.exclude_devices = self.config.get('exclude_devices', [])
+
+    def _is_device_excluded(self, device_name):
+        """
+        Check if a device should be excluded from validation based on regex patterns
+
+        Args:
+            device_name: Name of the device to check
+
+        Returns:
+            bool: True if device should be excluded, False otherwise
+        """
+        for pattern in self.exclude_devices:
+            try:
+                if re.match(pattern, device_name):
+                    return True
+            except re.error as e:
+                self.logger.warning(f"Invalid regex pattern '{pattern}' in exclude_devices: {e}")
+        return False
 
     def _validate(self, context: ValidatorContext) -> None:
         """
@@ -25,6 +45,9 @@ class PDUValidator(GlobalValidator):
         Args:
             context: ValidatorContext containing testbed and connection graph data
         """
+        testbed_info = context.get_testbeds()
+        self._bmc_host_pairs = self._build_bmc_host_pairs(
+            testbed_info)
 
         # Collect PDU connection data from all groups
         pdu_data = self._collect_pdu_data_globally(context)
@@ -82,7 +105,9 @@ class PDUValidator(GlobalValidator):
                 if isinstance(device_info, dict):
                     device_type = device_info.get('Type', '')
                     if device_type == 'DevSonic' or device_type.startswith('Fanout'):
-                        all_target_devices.append((device_name, group_name))
+                        # Check if device should be excluded
+                        if not self._is_device_excluded(device_name):
+                            all_target_devices.append((device_name, group_name))
 
             # Add all devices and PDU links (with group info for debugging)
             for device_name, device_info in devices.items():
@@ -236,18 +261,21 @@ class PDUValidator(GlobalValidator):
                     device_psu_key = f"{device_name}:{psu_name}"
 
                     if port_key in pdu_port_usage:
-                        # PDU port conflict detected
                         existing_device_psu = pdu_port_usage[port_key]
-                        # pdu_port_conflict: PDU outlet is used by multiple devices
-                        self.result.add_issue(
-                            'E4007',
-                            {
-                                "pdu": pdu_device,
-                                "port": pdu_port,
-                                "device1": existing_device_psu,
-                                "device2": device_psu_key
-                            }
-                        )
+                        existing_device = existing_device_psu.split(':')[0]
+                        # A BMC device and its host share the same chassis and PSU,
+                        # so sharing PDU ports is expected.
+                        if not self._is_bmc_host_pair(device_name, existing_device):
+                            # pdu_port_conflict: PDU outlet is used by multiple devices
+                            self.result.add_issue(
+                                'E4007',
+                                {
+                                    "pdu": pdu_device,
+                                    "port": pdu_port,
+                                    "device1": existing_device_psu,
+                                    "device2": device_psu_key
+                                }
+                            )
                     else:
                         pdu_port_usage[port_key] = device_psu_key
 
@@ -325,3 +353,32 @@ class PDUValidator(GlobalValidator):
                     'E4012',
                     {"device": device_name, "psu": psu_name, "feed_id": feed_id, "valid_feeds": valid_feeds}
                 )
+
+    @staticmethod
+    def _build_bmc_host_pairs(testbed_info):
+        """
+        Build pairs of (bmc_dut, host) from testbed.yaml bmc_host field.
+
+        Returns:
+            list[set]: List of device name sets where each set contains
+                a BMC DUT and its host that share the same chassis/PSU.
+        """
+        pairs = []
+        for tb in testbed_info:
+            if not isinstance(tb, dict):
+                continue
+            bmc_host = tb.get('bmc_host')
+            duts = tb.get('duts', tb.get('dut', []))
+            if not bmc_host or not duts:
+                continue
+            for dut in duts:
+                pairs.append({dut, bmc_host})
+        return pairs
+
+    def _is_bmc_host_pair(self, device1, device2):
+        """Check if two devices are a BMC and its host sharing the
+        same chassis, based on testbed.yaml bmc_host mapping."""
+        for pair in self._bmc_host_pairs:
+            if device1 in pair and device2 in pair:
+                return True
+        return False

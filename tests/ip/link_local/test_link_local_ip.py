@@ -61,8 +61,10 @@ class TestLinkLocalIPacket:
         sai_settings = {}
         sai_profile = "/usr/share/sonic/device/{}/{}/sai.profile".format(platform, hwsku)
         for line in duthost.command("cat %s" % sai_profile)["stdout_lines"]:
-            key, value = line.split("=")
-            sai_settings[key] = value
+            if (not re.match("^[ \t]*#", line)) and re.search("=", line):
+                # line should not a comment, and must contain the "=".
+                key, value = line.split("=")
+                sai_settings[key] = value
         if int(sai_settings.get("SAI_NOT_DROP_SIP_DIP_LINK_LOCAL", 0)) != 1:
             pytest.skip("Test is not supported, SAI_NOT_DROP_SIP_DIP_LINK_LOCAL is not equal 1 or not specified")
 
@@ -113,7 +115,7 @@ class TestLinkLocalIPacket:
         duthost.command("rm -rf {}".format(PACKET_SAVE_PATH))
 
         # Get 2 downlinks
-        rx_iface, tx_iface = random.sample(downlinks, 2)
+        rx_iface, tx_iface = random.sample(sorted(downlinks), 2)
         ptf_rx_idx = mg_facts["minigraph_ptf_indices"][rx_iface]
         ptf_tx_idx = mg_facts["minigraph_ptf_indices"][tx_iface]
         link_local_src = self.get_port_default_ipv6_link_local_address(ptfhost, 'eth{}'.format(ptf_rx_idx))

@@ -138,6 +138,8 @@ def check_mux_status(duthost, state):
         return False
     for intf_state in output[2:]:
         intf = intf_state.split()
+        if len(intf) <= 7:
+            return False
         if intf[3] == state and intf[7] == "consistent":
             continue
         return False

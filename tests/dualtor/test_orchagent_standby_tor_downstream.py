@@ -43,6 +43,7 @@ logger = logging.getLogger(__file__)
 MUX_STATUS_CHECK_INTERVAL = 10
 MUX_STATUS_CHECK_TIMEOUT = 60
 
+
 @pytest.fixture(params=['ipv4', 'ipv6'])
 def ip_version(request):
     """Traffic IP version to test."""
@@ -381,9 +382,9 @@ def test_downstream_standby_mux_toggle_active(
     logger.info("Step 1.1: Add route to a nexthop which is a standby Neighbor")
     set_mux_state(rand_selected_dut, tbinfo, 'standby', tor_mux_intfs, toggle_all_simulator_ports)
     add_nexthop_routes(rand_selected_dut, random_dst_ip, nexthops=[target_server])
-    pytest_assert(
-        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0, 
-        lambda: check_mux_status(rand_selected_dut, "standby")),
+    pt_assert(
+        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0,
+                   lambda: check_mux_status(rand_selected_dut, "standby")),
         "Mux status did not reach 'standby' within {}s".format(MUX_STATUS_CHECK_TIMEOUT))
     logger.info("Step 1.2: Verify traffic to this route dst is forwarded to Active ToR and equally distributed")
     check_tunnel_balance(**test_params)
@@ -393,9 +394,9 @@ def test_downstream_standby_mux_toggle_active(
     logger.info("Stage 2: Verify Active Forwarding")
     logger.info("Step 2.1: Simulate Mux state change to active")
     set_mux_state(rand_selected_dut, tbinfo, 'active', tor_mux_intfs, toggle_all_simulator_ports)
-    pytest_assert(
-        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0, 
-        lambda: check_mux_status(rand_selected_dut, "active")),
+    pt_assert(
+        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0,
+                   lambda: check_mux_status(rand_selected_dut, "active")),
         "Mux status did not reach 'active' within {}s".format(MUX_STATUS_CHECK_TIMEOUT))
     logger.info("Step 2.2: Verify traffic to this route dst is forwarded directly to server")
     monitor_tunnel_and_server_traffic(rand_selected_dut, expect_server_traffic=True,
@@ -404,9 +405,9 @@ def test_downstream_standby_mux_toggle_active(
     logger.info("Stage 3: Verify Standby Forwarding Again")
     logger.info("Step 3.1: Simulate Mux state change to standby")
     set_mux_state(rand_selected_dut, tbinfo, 'standby', tor_mux_intfs, toggle_all_simulator_ports)
-    pytest_assert(
-        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0, 
-        lambda: check_mux_status(rand_selected_dut, "standby")),
+    pt_assert(
+        wait_until(MUX_STATUS_CHECK_TIMEOUT, MUX_STATUS_CHECK_INTERVAL, 0,
+                   lambda: check_mux_status(rand_selected_dut, "standby")),
         "Mux status did not reach 'standby' within {}s".format(MUX_STATUS_CHECK_TIMEOUT))
     logger.info("Step 3.2: Verify traffic to this route dst \
                 is now redirected back to Active ToR and equally distributed")

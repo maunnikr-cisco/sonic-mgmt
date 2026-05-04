@@ -2012,7 +2012,7 @@ Totals               6450                 6449
             for line in output:
                 if not_ready_prompt in line:
                     logging.warning(
-                         "CRM counters are not ready yet, will retry after 10 seconds"
+                         "CRM counters are not ready yet, will retry after 10 seconds "
                          "(if timeout not exceeded)"
                     )
                     return False

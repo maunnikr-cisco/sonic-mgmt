@@ -134,7 +134,10 @@ def check_mux_status(duthost, state):
     """
     Check if all interfaces are in expected state in mux status output
     """
-    output = duthost.shell("python3 /usr/local/bin/dualtor_neighbor_check.py")["stdout_lines"]
+    result = duthost.shell("python3 /usr/local/bin/dualtor_neighbor_check.py", module_ignore_errors=True)
+    if result["rc"] != 0:
+        return False
+    output = result["stdout_lines"]
     if len(output) <= 2:
         return False
     for intf_state in output[2:]:

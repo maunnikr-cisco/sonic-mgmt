@@ -370,14 +370,20 @@ def apply_peer_switch_table_to_dut(cleanup_mocked_configs, rand_selected_dut, mo
             'redis-cli -n 4 HSET "{}" "{}" "{}"'.format(device_meta_key, 'peer_switch', peer_switch_hostname)]
     dut.shell_cmds(cmds=cmds)
     logger.info("Wait for 120 seconds for complete update of configs after swss restart")
-    wait_until(120, 5, 5, check_config_applied)
+    pytest_assert(
+        wait_until(120, 5, 5, check_config_applied),
+        "Timed out waiting for PEER_SWITCH and DEVICE_METADATA configuration to appear in CONFIG_DB"
+    )
     if ((restart_swss) and (dut.get_asic_name() != 'gb')):
         # Restart swss on TH2 or TD3 platform to apply changes
         logger.info("Restarting swss service")
         dut.shell('systemctl reset-failed swss; systemctl restart swss')
         wait_critical_processes(dut)
     logger.info("Wait for 120 seconds for complete update of configs after swss restart")
-    wait_until(120, 5, 5, check_config_applied)
+    pytest_assert(
+        wait_until(120, 5, 5, check_config_applied),
+        "Timed out waiting for PEER_SWITCH and DEVICE_METADATA configuration to remain applied after swss restart"
+    )
 
 
 @pytest.fixture(scope='module')
